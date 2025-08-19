@@ -247,20 +247,16 @@ export class EvolutionApiService extends BaseAdapter<
     return null;
   }
 
-  // ✅ CORRECTION: This method is now responsible for adding the conversationProviderId.
   private async postInboundMessage(
     locationId: string,
     conversationId: string,
     contactId: string,
     body: string,
     direction: 'inbound' | 'outbound',
-    type: 'SMS' | 'Email', // This type is still needed by the API, even if it feels like WhatsApp
+    type: 'SMS' | 'Email',
     userId?: string,
   ): Promise<any> {
     const http = await this.getHttpClient(locationId);
-    // ✅ 1. Get the Conversation Provider ID from config
-    const conversationProviderId = this.configService.get<string>('GHL_CONVERSATION_PROVIDER_ID');
-    
     const payload: any = {
       type,
       locationId,
@@ -269,8 +265,6 @@ export class EvolutionApiService extends BaseAdapter<
       body,
       message: body,
       direction,
-      // ✅ 2. Add the provider ID to the payload to show the WLink icon
-      conversationProviderId: conversationProviderId,
     };
     if (direction === 'inbound') payload.status = 'unread';
     if (userId && direction === 'outbound') payload.userId = userId;
@@ -281,7 +275,7 @@ export class EvolutionApiService extends BaseAdapter<
         payload,
         { headers: { Version: '2021-07-28' } },
       );
-      this.logger.log(`Mensaje enviado exitosamente a la conversación ${conversationId} con providerId ${conversationProviderId}`);
+      this.logger.log(`Mensaje enviado exitosamente a la conversación ${conversationId}`);
       return data;
     } catch (error: any) {
       this.logger.error('Error enviando mensaje a GHL /inbound:', error?.response?.data);
@@ -562,7 +556,7 @@ export class EvolutionApiService extends BaseAdapter<
 
         let ghlContact: GhlContact | null = await this.getGhlContactByPhone(instance.locationId, contactPhone);
 
-        // --- REVISED CONTACT HANDLING LOGIC ---
+        // ✅ REVISED LOGIC
         if (isFromAgent) {
             if (!ghlContact) {
                 const genericName = `WhatsApp User ${contactPhone.slice(-4)}`;
@@ -575,11 +569,11 @@ export class EvolutionApiService extends BaseAdapter<
             
             if (ghlContact) {
                 // Contact exists. Update only if name is missing/generic or avatar is new.
-                this.logger.log(`Found existing GHL contact '${ghlContact.name || 'N/A'}' (ID: ${ghlContact.id}). Name will be preserved.`);
+                this.logger.log(`Found existing GHL contact '${ghlContact.name || 'N/A'}' (ID: ${ghlContact.id}).`);
                 const updatePayload: { name?: string; avatarUrl?: string } = {};
                 
                 // Only update name if it's missing or still a generic placeholder
-                if ((!ghlContact.name || ghlContact.name.startsWith('WhatsApp User')) && senderName && !senderName.startsWith('WhatsApp User')) {
+                if ((!ghlContact.name || ghlContact.name.startsWith('WhatsApp User')) && senderName) {
                     updatePayload.name = senderName;
                 }
                 if (profilePictureUrl) {
