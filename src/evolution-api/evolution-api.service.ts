@@ -247,7 +247,8 @@ export class EvolutionApiService extends BaseAdapter<
     return null;
   }
 
-private async postInboundMessage(
+  
+  private async postInboundMessage(
     locationId: string,
     conversationId: string,
     contactId: string,
@@ -262,64 +263,45 @@ private async postInboundMessage(
         'GHL_CONVERSATION_PROVIDER_ID',
     );
 
-    // Lógica para usar el tipo 'Custom' y obtener el ícono (esto se mantiene)
     const messageTypeForGhl =
         conversationProviderId && type === 'SMS' ? 'Custom' : type;
 
-    // ✨ CORRECCIÓN PRINCIPAL: SEPARAMOS LA LÓGICA PARA 'INBOUND' Y 'OUTBOUND'
+    // ✨ CORRECCIÓN FINAL: Unificamos los payloads y el endpoint
+    
+    // El payload base es muy similar para ambos casos
+    const payload: any = {
+        type: messageTypeForGhl,
+        conversationId,
+        contactId,
+        message: body, // Usamos 'message' consistentemente
+        direction,
+        conversationProviderId,
+    };
+    
+    // Añadimos propiedades específicas según la dirección
     if (direction === 'inbound') {
-        // LÓGICA EXCLUSIVA PARA MENSAJES ENTRANTES (DEL CLIENTE)
-        const payload = {
-            type: messageTypeForGhl, // Usamos 'Custom' para el ícono
-            conversationId,
-            contactId,
-            message: body,
-            direction: 'inbound',
-            status: 'unread',
-            conversationProviderId,
-        };
+        payload.status = 'unread';
+    } else if (direction === 'outbound') {
+        // Para mensajes salientes, es crucial incluir el userId del agente
+        payload.userId = userId;
+    }
 
-        try {
-            // Usamos el endpoint DEDICADO para mensajes entrantes. Esto resuelve TODO.
-            const { data } = await http.post(
-                `/conversations/messages/inbound`,
-                payload,
-                { headers: { Version: '2021-07-28' } },
-            );
-            this.logger.log(`Mensaje ENTRANTE procesado exitosamente para la conversación ${conversationId}`);
-            return data;
-        } catch (error: any) {
-            this.logger.error('Error enviando mensaje ENTRANTE a GHL:', error?.response?.data);
-            throw new IntegrationError('Failed to post inbound message to GHL.');
-        }
-    } else {
-        // LÓGICA EXCLUSIVA PARA MENSAJES SALIENTES (DEL AGENTE)
-        const payload = {
-            type: messageTypeForGhl, // 'Custom' para que también el saliente tenga el ícono
-            locationId,
-            conversationId,
-            contactId,
-            body,
-            direction: 'outbound',
-            userId,
-            conversationProviderId,
-        };
-
-        try {
-            // Usamos el endpoint general para mensajes salientes, que funciona bien.
-            const { data } = await http.post(
-                '/conversations/messages',
-                payload,
-                { headers: { Version: '2021-07-28' } },
-            );
-            this.logger.log(`Mensaje SALIENTE enviado exitosamente a la conversación ${conversationId}`);
-            return data;
-        } catch (error: any) {
-            this.logger.error('Error enviando mensaje SALIENTE a GHL:', error?.response?.data);
-            throw new IntegrationError('Failed to post outbound message to GHL.');
-        }
+    try {
+        // ENVIAMOS TODO A TRAVÉS DEL ENDPOINT '/inbound'
+        // Este endpoint ha demostrado manejar correctamente el type: 'Custom' para ambas direcciones.
+        const { data } = await http.post(
+            `/conversations/messages/inbound`,
+            payload,
+            { headers: { Version: '2021-07-28' } },
+        );
+        this.logger.log(`Mensaje (${direction}) procesado exitosamente para la conversación ${conversationId}`);
+        return data;
+    } catch (error: any) {
+        this.logger.error(`Error enviando mensaje (${direction}) a GHL a través de /inbound:`, error?.response?.data);
+        throw new IntegrationError(`Failed to post ${direction} message to GHL.`);
     }
 }
+
   
   private normalizePhoneE164(phone: string): string {
     if (!phone) return '';
