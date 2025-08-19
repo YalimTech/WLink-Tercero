@@ -257,32 +257,59 @@ export class EvolutionApiService extends BaseAdapter<
     userId?: string,
   ): Promise<any> {
     const http = await this.getHttpClient(locationId);
+
+    // ✅ OBTENER EL ID DEL PROVEEDOR DESDE LA CONFIGURACIÓN
+    const conversationProviderId = this.configService.get<string>(
+      'GHL_CONVERSATION_PROVIDER_ID',
+    );
+
     const payload: any = {
-      type,
+      type, // GHL espera 'SMS' como tipo base para canales personalizados
       locationId,
       conversationId,
       contactId,
       body,
       message: body,
       direction,
+      // ✅ CORRECCIÓN CLAVE: Adjuntar el ID de tu proveedor personalizado
+      conversationProviderId: conversationProviderId,
     };
-    if (direction === 'inbound') payload.status = 'unread';
-    if (userId && direction === 'outbound') payload.userId = userId;
+    
+    if (direction === 'inbound') {
+        payload.status = 'unread';
+    }
+    if (userId && direction === 'outbound') {
+        payload.userId = userId;
+    }
 
     try {
+      // Usamos el endpoint más moderno que maneja correctamente el conversationProviderId
       const { data } = await http.post(
-        '/conversations/messages/inbound',
+        '/conversations/messages',
         payload,
         { headers: { Version: '2021-07-28' } },
       );
       this.logger.log(`Mensaje enviado exitosamente a la conversación ${conversationId}`);
       return data;
     } catch (error: any) {
-      this.logger.error('Error enviando mensaje a GHL /inbound:', error?.response?.data);
-      throw new IntegrationError('Failed to post inbound message to GHL.');
+      this.logger.error('Error enviando mensaje a GHL /conversations/messages:', error?.response?.data);
+      // Si el endpoint moderno falla, intentamos con el endpoint original como fallback
+      try {
+        const { data } = await http.post(
+          '/conversations/messages/inbound',
+          payload,
+          { headers: { Version: '2021-07-28' } },
+        );
+        this.logger.log(`Mensaje enviado exitosamente a la conversación ${conversationId} (usando fallback /inbound)`);
+        return data;
+      } catch (fallbackError: any) {
+        this.logger.error('Error enviando mensaje a GHL /inbound (fallback):', fallbackError?.response?.data);
+        throw new IntegrationError('Failed to post message to GHL after multiple attempts.');
+      }
     }
   }
 
+  
   private normalizePhoneE164(phone: string): string {
     if (!phone) return '';
     const digits = phone.replace(/[^0-9]/g, '');
