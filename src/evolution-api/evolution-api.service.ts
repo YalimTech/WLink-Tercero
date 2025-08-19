@@ -568,14 +568,10 @@ export class EvolutionApiService extends BaseAdapter<
             const profilePictureUrl = await this.evolutionService.getProfilePic(instance.apiTokenInstance, instance.instanceName, data.key.remoteJid) || undefined;
             
             if (ghlContact) {
-                // Contact exists. Update only if name is missing/generic or avatar is new.
-                this.logger.log(`Found existing GHL contact '${ghlContact.name || 'N/A'}' (ID: ${ghlContact.id}).`);
-                const updatePayload: { name?: string; avatarUrl?: string } = {};
+                // Contact exists. Only update avatar if it's new.
+                this.logger.log(`Found existing GHL contact '${ghlContact.name || 'N/A'}' (ID: ${ghlContact.id}). Name will not be changed.`);
+                const updatePayload: { avatarUrl?: string } = {};
                 
-                // Only update name if it's missing or still a generic placeholder
-                if ((!ghlContact.name || ghlContact.name.startsWith('WhatsApp User')) && senderName) {
-                    updatePayload.name = senderName;
-                }
                 if (profilePictureUrl) {
                     updatePayload.avatarUrl = profilePictureUrl;
                 }
