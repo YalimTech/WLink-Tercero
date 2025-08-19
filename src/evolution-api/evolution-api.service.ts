@@ -94,8 +94,6 @@ export class EvolutionApiService extends BaseAdapter<
         Authorization: `Bearer ${currentAccessToken}`,
         Version: this.ghlApiVersion,
         'Content-Type': 'application/json',
-        LocationId: ghlLocationId,
-        'x-location-id': ghlLocationId,
       },
     });
   }
@@ -142,7 +140,6 @@ export class EvolutionApiService extends BaseAdapter<
     const digits = this.normalizeDigits(phone);
     if (!digits) return null;
 
-    // Intento 1: Usar el endpoint de lookup, que es el más específico.
     const formattedPhone = this.normalizePhoneE164(phone);
     try {
       this.logger.log(`Attempting lookup for contact in GHL with phone: ${formattedPhone}`);
@@ -157,21 +154,19 @@ export class EvolutionApiService extends BaseAdapter<
     } catch (error) {
       const axiosError = error as AxiosError;
       const status = axiosError.response?.status;
-      // Tratar 400 y 404 como "no encontrado" y continuar al siguiente método.
       if (status === 404 || status === 400) {
         this.logger.warn(`Lookup for phone ${formattedPhone} failed with status ${status}. This can be normal for new contacts. Trying search as a fallback.`);
       } else {
-        // Otros errores (500, etc.) sí deben ser registrados como errores graves, pero no detenemos el flujo.
         this.logger.error(
           `Error during contact lookup in GHL. Status: ${status}, Data: ${JSON.stringify(axiosError.response?.data)}`,
         );
       }
     }
 
-    // Intento 2 (Fallback): Usar el endpoint de búsqueda general.
     try {
       this.logger.log(`Attempting search for contact in GHL with query: ${digits}`);
-      const { data } = await httpClient.get(`/contacts/search`, {
+      // ✅ FIX: Changed endpoint from `/contacts/search` to `/contacts`
+      const { data } = await httpClient.get(`/contacts`, {
         params: { locationId, query: digits },
       });
       const list: any[] = (data?.contacts || []) as any[];
@@ -191,11 +186,10 @@ export class EvolutionApiService extends BaseAdapter<
       this.logger.error(`Contact search failed entirely. Status: ${s} ${JSON.stringify(d)}`);
     }
 
-    // Si ninguna de las dos formas funciona, el contacto no existe.
     this.logger.log(`No contact found for phone ${formattedPhone} after trying lookup and search.`);
     return null;
   }
-
+  
   public async getGhlContactById(
     locationId: string,
     contactId: string,
@@ -389,12 +383,11 @@ export class EvolutionApiService extends BaseAdapter<
       }
     }
   }
-  
+
   /**
-   * Creates a new contact in GHL using the /upsert endpoint.
-   * This method is intended for creating contacts that do not yet exist.
+   * ✅ NEW: Creates a new contact in GHL using the /contacts endpoint.
    */
-  private async createGhlContactWithUpsert(
+  private async createGhlContact(
     locationId: string,
     phone: string,
     name: string,
@@ -411,49 +404,57 @@ export class EvolutionApiService extends BaseAdapter<
         name,
         source: 'WhatsApp WLink',
       };
-      
-      // La API de GHL usa 'avatarUrl' en el payload del contacto
       if (avatarUrl) {
         payload.avatarUrl = avatarUrl;
       }
-      const { data } = await httpClient.post('/contacts/upsert', payload);
+      // Uses POST /contacts/ which is for creation, safer than upsert
+      const { data } = await httpClient.post('/contacts/', payload);
       if (data?.contact?.id) {
         this.logger.log(
-          `Contact created successfully via upsert with ID: ${data.contact.id}`,
+          `Contact created successfully with ID: ${data.contact.id}`,
         );
         return data.contact as GhlContact;
       }
       this.logger.error(
-        'The GHL /upsert response did not contain a contact ID.',
+        'The GHL /contacts response did not contain a contact ID.',
         data,
       );
-      throw new Error('Invalid response from GHL when upserting contact.');
+      throw new Error('Invalid response from GHL when creating contact.');
     } catch (error: any) {
       this.logger.error(
-        'Critical error creating contact in GHL via upsert:',
+        'Critical error creating contact in GHL:',
         error.response?.data,
       );
       throw new Error('Could not create contact in GHL.');
     }
   }
-  
+
   /**
-   * Updates ONLY the profile picture for an existing GHL contact.
+   * ✅ NEW: Updates an existing GHL contact using the /contacts/{id} endpoint.
    */
-  public async updateGhlContactProfilePicture(contactId: string, locationId: string, profilePictureUrl: string): Promise<void> {
+  private async updateGhlContact(
+    locationId: string,
+    contactId: string,
+    payload: { name?: string; avatarUrl?: string },
+  ): Promise<GhlContact> {
+    this.logger.log(`Attempting to update GHL contact ${contactId} with payload: ${JSON.stringify(payload)}`);
     try {
-      if (!contactId || !profilePictureUrl) {
-        return;
+      const httpClient = await this.getHttpClient(locationId);
+      const { data } = await httpClient.put(`/contacts/${contactId}`, payload);
+      if (data?.contact?.id) {
+        this.logger.log(`Contact ${contactId} updated successfully.`);
+        return data.contact as GhlContact;
       }
-      const http = await this.getHttpClient(locationId);
-      // La API de GHL para actualizar un contacto usa 'avatarUrl'
-      await http.put(`/contacts/${contactId}`, { avatarUrl: profilePictureUrl });
-      this.logger.log(`Updated profile picture for contact ${contactId}.`);
+      this.logger.error(`The GHL PUT /contacts/${contactId} response was invalid.`, data);
+      throw new Error('Invalid response from GHL when updating contact.');
     } catch (error: any) {
-      this.logger.error(`Error updating profile picture for contact ${contactId}:`, error?.response?.data || error?.message);
+      this.logger.error(
+        `Critical error updating contact ${contactId} in GHL:`,
+        error.response?.data,
+      );
+      throw new Error(`Could not update contact ${contactId} in GHL.`);
     }
   }
-
 
   public async handlePlatformWebhook(
     ghlWebhook: GhlWebhookDto,
@@ -494,18 +495,10 @@ export class EvolutionApiService extends BaseAdapter<
       let mappedStatus: InstanceState;
 
       switch (state) {
-        case 'open':
-          mappedStatus = 'authorized';
-          break;
-        case 'connecting':
-          mappedStatus = 'starting';
-          break;
-        case 'close':
-          mappedStatus = 'notAuthorized';
-          break;
-        case 'qrcode':
-          mappedStatus = 'qr_code';
-          break;
+        case 'open': mappedStatus = 'authorized'; break;
+        case 'connecting': mappedStatus = 'starting'; break;
+        case 'close': mappedStatus = 'notAuthorized'; break;
+        case 'qrcode': mappedStatus = 'qr_code'; break;
         default:
           this.logger.warn(`[EvolutionApiService] Unknown connection state received for '${instanceName}': '${state}'. Not updating state.`);
           return;
@@ -539,125 +532,127 @@ export class EvolutionApiService extends BaseAdapter<
         this.logger.warn(`[EvolutionApiService] Webhook for instance '${instanceName}' received, but could not find/update it in DB. Check instance name.`);
       }
     } else if ((webhook.event === 'messages.upsert' || webhook.event === 'MESSAGES_UPSERT') && webhook.data?.key?.remoteJid) {
-      let instance = await this.prisma.getInstance(instanceName);
-      if (!instance) {
-        const possibleInstanceId: string | undefined = webhook?.data?.instanceId;
-        if (possibleInstanceId) {
+        let instance = await this.prisma.getInstance(instanceName);
+        if (!instance) {
+          const possibleInstanceId: string | undefined = webhook?.data?.instanceId;
+          if (possibleInstanceId) {
+            try {
+              const byId = await this.prisma.findInstanceById(possibleInstanceId);
+              if (byId) {
+                instance = byId;
+                this.logger.log(`[EvolutionApiService] Resolved instance by instanceId '${possibleInstanceId}' for webhook instance '${instanceName}'.`);
+              }
+            } catch {}
+          }
+        }
+        if (!instance) {
+          this.logger.warn(`[EvolutionApiService] Webhook 'messages.upsert' for unknown instance '${instanceName}'. Ignoring message.`);
+          return;
+        }
+
+        const { data } = webhook;
+        const contactPhone = data.key.remoteJid.split('@')[0];
+        const isFromAgent = data.key?.fromMe === true;
+
+        let ghlContact: GhlContact | null = await this.getGhlContactByPhone(instance.locationId, contactPhone);
+
+        // ✅ REVISED LOGIC
+        if (isFromAgent) {
+            if (!ghlContact) {
+                const genericName = `WhatsApp User ${contactPhone.slice(-4)}`;
+                this.logger.log(`[EvolutionApiService] Outbound message to a new number. Creating contact for ${contactPhone} with generic name.`);
+                ghlContact = await this.createGhlContact(instance.locationId, contactPhone, genericName);
+            }
+        } else { // Incoming message
+            const senderName = data.pushName || `WhatsApp User ${contactPhone.slice(-4)}`;
+            const profilePictureUrl = await this.evolutionService.getProfilePic(instance.apiTokenInstance, instance.instanceName, data.key.remoteJid) || undefined;
+            
+            if (ghlContact) {
+                // Contact exists. Update only if name is missing/generic or avatar is new.
+                this.logger.log(`Found existing GHL contact '${ghlContact.name || 'N/A'}' (ID: ${ghlContact.id}).`);
+                const updatePayload: { name?: string; avatarUrl?: string } = {};
+                
+                // Only update name if it's missing or still a generic placeholder
+                if ((!ghlContact.name || ghlContact.name.startsWith('WhatsApp User')) && senderName) {
+                    updatePayload.name = senderName;
+                }
+                if (profilePictureUrl) {
+                    updatePayload.avatarUrl = profilePictureUrl;
+                }
+
+                if (Object.keys(updatePayload).length > 0) {
+                    ghlContact = await this.updateGhlContact(instance.locationId, ghlContact.id, updatePayload);
+                }
+            } else {
+                // Contact does not exist. Create it with the sender's name and avatar.
+                this.logger.log(`[EvolutionApiService] No GHL contact found for ${contactPhone}. Creating new contact with name '${senderName}'.`);
+                ghlContact = await this.createGhlContact(instance.locationId, contactPhone, senderName, profilePictureUrl);
+            }
+        }
+
+        if (!ghlContact) {
+            this.logger.error(`[EvolutionApiService] Failed to find or create a GHL contact for phone ${contactPhone}. Aborting message processing.`);
+            return;
+        }
+        
+        const direction: 'inbound' | 'outbound' = isFromAgent ? 'outbound' : 'inbound';
+        const messageBody = getMessageBody(webhook.data.message);
+        if (!messageBody) {
+          this.logger.warn(`[EvolutionApiService] Empty or unsupported message body for instance ${instanceName}. Ignoring.`);
+          return;
+        }
+
+        const conversation = await this.findOrCreateGhlConversation(instance.locationId, ghlContact.id);
+        if (!conversation) {
+          this.logger.error(`[EvolutionApiService] Could not find or create conversation for contact ${ghlContact.id}`);
+          return;
+        }
+        const conversationId: string = (conversation?.id || (conversation as any)?.conversationId || (conversation as any)?.conversation?.id);
+
+        let agentUserId: string | undefined = undefined;
+        if (isFromAgent) {
           try {
-            const byId = await this.prisma.findInstanceById(possibleInstanceId);
-            if (byId) {
-              instance = byId;
-              this.logger.log(`[EvolutionApiService] Resolved instance by instanceId '${possibleInstanceId}' for webhook instance '${instanceName}'.`);
+            const senderJid: string | undefined = (webhook as any)?.sender;
+            let agentDigits = '';
+            if (senderJid) agentDigits = this.normalizeDigits(senderJid.split('@')[0]);
+            if (!agentDigits && (instance.settings as any)?.agentPhone) {
+              agentDigits = this.normalizeDigits((instance.settings as any)?.agentPhone);
+            }
+            if (agentDigits) {
+              const ghlUser = await this.findGhlUserByPhone(instance.locationId, agentDigits);
+              if (ghlUser?.id && this.isValidGhlUserId(ghlUser.id, instance.locationId)) {
+                agentUserId = ghlUser.id;
+                this.logger.log(`[EvolutionApiService] Outbound message attributed to agent ${ghlUser.firstName || ''} ${ghlUser.lastName || ''} (ID: ${ghlUser.id}).`);
+                try {
+                  const newSettings = { ...(instance.settings || {}) } as any;
+                  newSettings.agentUserId = ghlUser.id;
+                  newSettings.agentPhone = agentDigits;
+                  await this.prisma.updateInstanceSettings(instance.instanceName, newSettings);
+                } catch {}
+              }
+            }
+            if (!agentUserId) {
+              const mapped = (instance.settings as any)?.agentUserId as string | undefined;
+              if (this.isValidGhlUserId(mapped, instance.locationId)) {
+                agentUserId = mapped;
+                this.logger.log(`[EvolutionApiService] Using previously mapped agentUserId from settings for instance '${instance.instanceName}'.`);
+              } else {
+                this.logger.warn('[EvolutionApiService] Could not resolve agent userId for outbound message; sending without user attribution.');
+              }
             }
           } catch {}
         }
-      }
-      if (!instance) {
-        this.logger.warn(`[EvolutionApiService] Webhook 'messages.upsert' for unknown instance '${instanceName}'. Ignoring message.`);
-        return;
-      }
 
-      const { data } = webhook;
-      const contactPhone = data.key.remoteJid.split('@')[0];
-      const isFromAgent = data.key?.fromMe === true;
-
-      let ghlContact: GhlContact | null = await this.getGhlContactByPhone(instance.locationId, contactPhone);
-
-      if (isFromAgent) {
-        if (!ghlContact) {
-          const genericName = `WhatsApp User ${contactPhone.slice(-4)}`;
-          this.logger.log(`[EvolutionApiService] Outbound message to a new number. Creating contact for ${contactPhone} with generic name.`);
-          ghlContact = await this.createGhlContactWithUpsert(
-            instance.locationId,
-            contactPhone,
-            genericName,
-          );
-        }
-      } else { // Mensaje entrante
-        const senderName = data.pushName || `WhatsApp User ${contactPhone.slice(-4)}`;
-        // Asumimos que la URL de la foto de perfil podría venir en el payload del webhook.
-        const profilePictureUrl = await this.evolutionService.getProfilePic(instance.apiTokenInstance, instance.instanceName, data.key.remoteJid) || undefined;
-        
-
-        if (ghlContact) {
-          this.logger.log(`[EvolutionApiService] Found existing contact '${ghlContact.name}' (ID: ${ghlContact.id}) for phone ${contactPhone}. Name will not be changed.`);
-          if (profilePictureUrl) {
-            await this.updateGhlContactProfilePicture(ghlContact.id, instance.locationId, profilePictureUrl);
-          }
-        } else {
-          this.logger.log(`[EvolutionApiService] No contact found for ${contactPhone}. Creating new contact with name '${senderName}'.`);
-          ghlContact = await this.createGhlContactWithUpsert(
-            instance.locationId,
-            contactPhone,
-            senderName,
-            profilePictureUrl,
-          );
-        }
-      }
-
-      if (!ghlContact) {
-          this.logger.error(`[EvolutionApiService] Failed to find or create a GHL contact for phone ${contactPhone}. Aborting message processing.`);
-          return;
-      }
-      
-      const direction: 'inbound' | 'outbound' = isFromAgent ? 'outbound' : 'inbound';
-      const messageBody = getMessageBody(webhook.data.message);
-      if (!messageBody) {
-        this.logger.warn(`[EvolutionApiService] Empty or unsupported message body for instance ${instanceName}. Ignoring.`);
-        return;
-      }
-
-      const conversation = await this.findOrCreateGhlConversation(instance.locationId, ghlContact.id);
-      if (!conversation) {
-        this.logger.error(`[EvolutionApiService] Could not find or create conversation for contact ${ghlContact.id}`);
-        return;
-      }
-      const conversationId: string = (conversation?.id || (conversation as any)?.conversationId || (conversation as any)?.conversation?.id);
-
-      let agentUserId: string | undefined = undefined;
-      if (isFromAgent) {
-        try {
-          const senderJid: string | undefined = (webhook as any)?.sender;
-          let agentDigits = '';
-          if (senderJid) agentDigits = this.normalizeDigits(senderJid.split('@')[0]);
-          if (!agentDigits && (instance.settings as any)?.agentPhone) {
-            agentDigits = this.normalizeDigits((instance.settings as any)?.agentPhone);
-          }
-          if (agentDigits) {
-            const ghlUser = await this.findGhlUserByPhone(instance.locationId, agentDigits);
-            if (ghlUser?.id && this.isValidGhlUserId(ghlUser.id, instance.locationId)) {
-              agentUserId = ghlUser.id;
-              this.logger.log(`[EvolutionApiService] Outbound message attributed to agent ${ghlUser.firstName || ''} ${ghlUser.lastName || ''} (ID: ${ghlUser.id}).`);
-              try {
-                const newSettings = { ...(instance.settings || {}) } as any;
-                newSettings.agentUserId = ghlUser.id;
-                newSettings.agentPhone = agentDigits;
-                await this.prisma.updateInstanceSettings(instance.instanceName, newSettings);
-              } catch {}
-            }
-          }
-          if (!agentUserId) {
-            const mapped = (instance.settings as any)?.agentUserId as string | undefined;
-            if (this.isValidGhlUserId(mapped, instance.locationId)) {
-              agentUserId = mapped;
-              this.logger.log(`[EvolutionApiService] Using previously mapped agentUserId from settings for instance '${instance.instanceName}'.`);
-            } else {
-              this.logger.warn('[EvolutionApiService] Could not resolve agent userId for outbound message; sending without user attribution.');
-            }
-          }
-        } catch {}
-      }
-
-      await this.postInboundMessage(
-        instance.locationId,
-        conversationId,
-        ghlContact.id,
-        messageBody,
-        direction,
-        'SMS',
-        agentUserId,
-      );
-      this.logger.log(`[EvolutionApiService] Message upsert processed for instance '${instanceName}'.`);
+        await this.postInboundMessage(
+          instance.locationId,
+          conversationId,
+          ghlContact.id,
+          messageBody,
+          direction,
+          'SMS',
+          agentUserId,
+        );
+        this.logger.log(`[EvolutionApiService] Message upsert processed for instance '${instanceName}'.`);
     } else {
       this.logger.log(`[EvolutionApiService] Evolution Webhook event '${webhook.event}' received for instance '${instanceName}'. No specific handler or missing data. Full Payload: ${JSON.stringify(webhook)}`);
     }
